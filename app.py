@@ -1,18 +1,25 @@
 # ==============================================================================
-# loteo_engine.py — ARQUITECTURA UNIFICADA NV2
-# Consolida Modelos Inmutables, Evaluación en NumPy y Parser de Configuración.
-# Mantiene compatibilidad absoluta con firmas y estructuras de la UI (app.py).
+# app.py — SISTERMA CONSOLIDADO DE LOTEO DE TINTORERÍA NV2 (TODO-EN-UNO)
+# Interfaz Gráfica (Streamlit) + Parser de Reglas + Motor de Optimización (NumPy)
 # ==============================================================================
 
+import io
+import json
+import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Any
-import re
+import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
 
-# ------------------------------------------------------------------------------
-# VARIABLES GLOBALES EXPORTADAS REQUERIDAS POR LOS SELECTORES DE LA UI
-# ------------------------------------------------------------------------------
+# Configuración de página de Streamlit (Debe ser la primera instrucción)
+st.set_page_config(page_title="Loteo de Tintorería NV2", layout="wide")
+
+# ==============================================================================
+# 1. CONFIGURACIONES GLOBALES Y VARIABLES DE CONTROL
+# ==============================================================================
 all_rule_order_options = [
     "ANCHO18>COMBO_ANCHOS>COLOR_R>FAMILIA",
     "FAMILIA>COLOR_R>COMBO_ANCHOS>ANCHO18",
@@ -35,14 +42,22 @@ DEFAULT_ALLOWED_PAIRS = [
     ("OTROS", "AHEAD2"),
 ]
 
+# Inicialización segura del estado de Streamlit (Session State)
+for key, default in [
+    ("df_data", None), ("df_fam", None), ("reglas_raw", None),
+    ("params", None), ("df_cap", None), ("excel_path", None),
+    ("resultado", None), ("excel_bytes", None)
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
 
 # ==============================================================================
-# 1. MODELOS DE DATOS E INMUTABILIDAD CORE
+# 2. MODELOS DE DATOS INMUTABLES (MOTOR NV2)
 # ==============================================================================
 
 @dataclass(frozen=True)
 class OptimizationParams:
-    """Configuración global y pesos de penalización matemática del motor."""
     min_diff: float
     max_diff: float
     max_sku: int
@@ -64,10 +79,8 @@ class OptimizationParams:
     w_tipo_tejido_flemish: float = 4.0
     beam_width: int = 3
 
-
 @dataclass(frozen=True)
 class CapRange:
-    """Representación física inmutable de un rango de capacidad de reactor."""
     rango_id: str
     categoria: str
     minimo: float
@@ -75,10 +88,8 @@ class CapRange:
     capacidad: float
     mix: str
 
-
 @dataclass
 class SkuRow:
-    """Estado mutable de un rollo/SKU durante las asignaciones parciales."""
     idx: int
     lnk: str
     tela_cuerpo: str
@@ -97,30 +108,52 @@ class SkuRow:
     lbs_restantes: float
     lbs_scrap: float = 0.0
 
-
 @dataclass
 class BatchCandidate:
-    """Estructura candidata para evaluar métricas de scoring antes de consolidar."""
     rango_id: str
     categoria: str
     mix: str
     minimo: float
     maximo: float
     total_lote: float
-    rows_assigned: List[Tuple[int, float]]  # List of (idx, lbs_asignadas)
+    rows_assigned: List[Tuple[int, float]]
     anchos_unicos: List[float]
     pct_carga_usado: float
     score: float = -1e30
 
 
 # ==============================================================================
-# 2. CAPA DE ENTRADA Y REPOSITORIO VECTORIZADO
+# 3. LÓGICA DEL PARSER DE REGLAS OPERATIVAS Y REPOSITORIO
 # ==============================================================================
 
-class DataRepository:
-    """Validador y normalizador de las demandas de planta."""
-    REQUIRED_DATA_COLS = ["LNK", "TELA.CUERPO", "COLOR", "PRIORIDAD", "ANCHO.F.C", "ANCHO.F.M", "TOTAL", "MIX", "CONSUMO_C"]
+def parse_reglas_operativas(excel_path):
+    """Parsea la pestaña REGLAS_OPERATIVAS del Excel y extrae el diccionario de control."""
+    params_default = {
+        "MIN_DIFF": 1.5, "MAX_DIFF": 4.0, "MAX_SKU": 5,
+        "SPLIT_MIN_LBS_DEFAULT": 500.0, "SPLIT_MIN_LBS_ANCHO18": 500.0,
+        "W_FILL": 5.0, "W_CAP_LOSS": 3.0, "W_WIDTH_PREF": 2.0, "W_1100_WIDTHS_STRICT": 10.0,
+        "TIPO_TEJIDO_ENABLE": True, "W_TIPO_TEJIDO_FLEECE": 4.0,
+        "RULE_ORDER": ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"],
+        "WIDTH_PREF_LIST": [2, 3, 1, 4, 5, 6],
+        "RULE_TOGGLES": {
+            "RESTRICCION_FAMILIA": True, "RESTRICCION_COLOR": True,
+            "RESTRICCION_ANCHO": True, "COMBINACION_ANCHOS": True
+        }
+    }
+    try:
+        df_cap = pd.read_excel(excel_path, sheet_name="REGLAS_OPERATIVAS")
+    except Exception:
+        df_cap = pd.DataFrame([
+            {"CATEGORIA": "A-4000", "MINIMO": 3200.0, "MAXIMO": 4000.0, "CAPACIDAD": 40000.0, "MIX": "DYE"},
+            {"CATEGORIA": "B-3300", "MINIMO": 2600.0, "MAXIMO": 3300.0, "CAPACIDAD": 33000.0, "MIX": "DYE"},
+            {"CATEGORIA": "E-1100", "MINIMO": 900.0, "MAXIMO": 1100.0, "CAPACIDAD": 11000.0, "MIX": "DYE"}
+        ])
 
+    context_rules = {"restr_ancho": {}, "reglas_combo": [], "restr_color": {}, "restr_fam": {}}
+    return context_rules, params_default, build_cap_dataframe(df_cap)
+
+
+class DataRepository:
     @staticmethod
     def clean_string(val: Any) -> str:
         if pd.isna(val): return ""
@@ -144,21 +177,14 @@ class DataRepository:
                 pct_carga = 1.0
 
             sku = SkuRow(
-                idx=int(idx),
-                lnk=cls.clean_string(row.get("LNK", "")),
+                idx=int(idx), lnk=cls.clean_string(row.get("LNK", "")),
                 tela_cuerpo=cls.clean_string(row.get("TELA.CUERPO", "")),
-                color=cls.clean_string(row.get("COLOR", "")),
-                tono=cls.clean_string(row.get("TONO", "")),
-                prioridad=prio_val,
-                bloque=cls.parse_bloque(prio_val),
-                familia=cls.clean_string(row.get("FAMILIA", "")),
-                color_r=cls.clean_string(row.get("COLOR_R", "")),
-                style=cls.clean_string(row.get("STYLE", "")),
-                tipo_tejido=cls.clean_string(row.get("TIPO_TEJIDO", "")),
-                pct_carga=float(pct_carga),
-                consumo_c=max(0.0, float(pd.to_numeric(row.get("CONSUMO_C", 0.0), errors="coerce") or 0.0)),
-                anchos=anchos,
-                lbs_iniciales=max(0.0, float(pd.to_numeric(row.get("TOTAL", 0.0), errors="coerce") or 0.0)),
+                color=cls.clean_string(row.get("COLOR", "")), tono=cls.clean_string(row.get("TONO", "")),
+                prioridad=prio_val, bloque=cls.parse_bloque(prio_val),
+                familia=cls.clean_string(row.get("FAMILIA", "")), color_r=cls.clean_string(row.get("COLOR_R", "")),
+                style=cls.clean_string(row.get("STYLE", "")), tipo_tejido=cls.clean_string(row.get("TIPO_TEJIDO", "")),
+                pct_carga=float(pct_carga), consumo_c=max(0.0, float(pd.to_numeric(row.get("CONSUMO_C", 0.0), errors="coerce") or 0.0)),
+                anchos=anchos, lbs_iniciales=max(0.0, float(pd.to_numeric(row.get("TOTAL", 0.0), errors="coerce") or 0.0)),
                 lbs_restantes=max(0.0, float(pd.to_numeric(row.get("TOTAL", 0.0), errors="coerce") or 0.0))
             )
             sku_list.append(sku)
@@ -166,22 +192,20 @@ class DataRepository:
 
     @staticmethod
     def parse_bloque(prio_text: str) -> str:
-        if any(token in prio_text for token in ["PAST DUE", "DUE", "VENC"]):
-            return "VENCIDOS"
+        if any(token in prio_text for token in ["PAST DUE", "DUE", "VENC"]): return "VENCIDOS"
         if "AHEAD2" in prio_text: return "AHEAD2"
         if "AHEAD" in prio_text: return "AHEAD"
         return "OTROS"
 
 
 # ==============================================================================
-# 3. EVALUACIÓN DE REGLAS OPERATIVAS INDUSTRIALES
+# 4. CAPA MATEMÁTICA Y MOTOR DE SECUENCIACIÓN CORE (LOTE_ENGINE)
 # ==============================================================================
 
 class RuleEvaluator:
     @staticmethod
     def evaluate_seed_context(seed: SkuRow, sku_pool: List[SkuRow], params: OptimizationParams, context_rules: Dict[str, Any]) -> Tuple[str, List[float], Dict[str, Any]]:
-        if seed.mix != "DYE":
-            return "NONE", [], {}
+        if seed.mix != "DYE": return "NONE", [], {}
         rule_info = {"origen_prioridad": "MIX", "combo_target_width": None}
         for rule in params.rule_order:
             if rule == "ANCHO18" and seed.style in context_rules.get("restr_ancho", {}):
@@ -208,33 +232,6 @@ class RuleEvaluator:
                 rule_info.update({"origen_prioridad": "FAMILIA"})
                 return "FAMILIA", prios, rule_info
         return "DEFAULT", [], rule_info
-
-
-class BatchScorer:
-    @staticmethod
-    def calculate_score(batch: BatchCandidate, unique_widths: Set[float], seed: SkuRow, params: OptimizationParams, context_rules: Dict[str, Any]) -> float:
-        fill_rate = batch.total_lote / batch.maximo if batch.maximo > 1e-9 else 0.0
-        cap_loss = batch.maximo - batch.total_lote
-        len_widths = len(unique_widths)
-        try:
-            rank = params.width_pref_list.index(len_widths)
-        except ValueError:
-            rank = len(params.width_pref_list) + abs(len_widths - params.width_pref_list[-1])
-        width_pref_score = -float(rank)
-        score = (params.w_fill * fill_rate) - (params.w_cap_loss * cap_loss) + (params.w_width_pref * width_pref_score)
-        if abs(batch.maximo - 1100.0) < 1e-6:
-            score -= params.w_1100_strict * max(0, len_widths - 1)
-        if params.tipo_tejido_enable and batch.categoria in params.tipo_tejido_categorias:
-            if seed.tipo_tejido == "FLEECE":
-                restr_fam = context_rules.get("restr_fam", {})
-                if seed.familia not in restr_fam or len(restr_fam.get(seed.familia, [])) == 0:
-                    score += params.w_tipo_tejido_flemish
-        return score
-
-
-# ==============================================================================
-# 4. MOTOR CORE (BEAM SEARCH VECTORIZADO EN NUMPY)
-# ==============================================================================
 
 class LoteoEngine:
     def __init__(self, params: OptimizationParams, cap_ranges: List[CapRange], context_rules: Dict[str, Any]):
@@ -306,7 +303,16 @@ class LoteoEngine:
         if target_widths_count is not None and len(unique_batch_widths) < target_widths_count: return None
 
         candidate = BatchCandidate(range_target.rango_id, range_target.categoria, range_target.mix, range_target.minimo, range_target.maximo, batch_lbs, assigned_rows, sorted(list(unique_batch_widths)), seed.pct_carga)
-        candidate.score = BatchScorer.calculate_score(candidate, unique_batch_widths, seed, self.params, self.context_rules)
+        
+        # Scoring
+        fill_rate = batch_lbs / range_target.maximo
+        cap_loss = range_target.maximo - batch_lbs
+        len_widths = len(unique_batch_widths)
+        try: rank = self.params.width_pref_list.index(len_widths)
+        except ValueError: rank = len(self.params.width_pref_list) + len_widths
+        width_pref_score = -float(rank)
+        
+        candidate.score = (self.params.w_fill * fill_rate) - (self.params.w_cap_loss * cap_loss) + (self.params.w_width_pref * width_pref_score)
         return candidate
 
     def execute_optimization(self, sku_pool: List[SkuRow]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -371,39 +377,7 @@ class LoteoEngine:
 
 
 # ==============================================================================
-# 5. COMPATIBILIDAD CON PARSER DE REGLAS OPERATIVAS (EX-MODULO PARSER)
-# ==============================================================================
-
-def parse_reglas_operativas(excel_path: str):
-    """Parsea las reglas de planta e inyecta parámetros por defecto mapeados a la UI."""
-    params_default = {
-        "MIN_DIFF": 1.5, "MAX_DIFF": 4.0, "MAX_SKU": 5,
-        "SPLIT_MIN_LBS_DEFAULT": 500.0, "SPLIT_MIN_LBS_ANCHO18": 500.0,
-        "W_FILL": 5.0, "W_CAP_LOSS": 3.0, "W_WIDTH_PREF": 2.0, "W_1100_WIDTHS_STRICT": 10.0,
-        "TIPO_TEJIDO_ENABLE": True, "W_TIPO_TEJIDO_FLEECE": 4.0,
-        "RULE_ORDER": ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"],
-        "WIDTH_PREF_LIST": [2, 3, 1, 4, 5, 6],
-        "RULE_TOGGLES": {
-            "RESTRICCION_FAMILIA": True, "RESTRICCION_COLOR": True,
-            "RESTRICCION_ANCHO": True, "COMBINACION_ANCHOS": True
-        }
-    }
-
-    try:
-        df_cap = pd.read_excel(excel_path, sheet_name="REGLAS_OPERATIVAS")
-    except Exception:
-        df_cap = pd.DataFrame([
-            {"CATEGORIA": "A-4000", "MINIMO": 3200.0, "MAXIMO": 4000.0, "CAPACIDAD": 40000.0, "MIX": "DYE"},
-            {"CATEGORIA": "B-3300", "MINIMO": 2600.0, "MAXIMO": 3300.0, "CAPACIDAD": 33000.0, "MIX": "DYE"},
-            {"CATEGORIA": "E-1100", "MINIMO": 900.0, "MAXIMO": 1100.0, "CAPACIDAD": 11000.0, "MIX": "DYE"}
-        ])
-
-    context_rules = {"restr_ancho": {}, "reglas_combo": [], "restr_color": {}, "restr_fam": {}}
-    return context_rules, params_default, build_cap_dataframe(df_cap)
-
-
-# ==============================================================================
-# 6. ENLACES Y MÉTODOS PUENTE REQUERIDOS EXACTAMENTE POR APP.PY
+# 5. FUNCIONES PUENTE Y EXTRACTORES REQUERIDOS POR LA INTERFAZ
 # ==============================================================================
 
 def load_data_sheet(excel_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -454,9 +428,7 @@ def run_loteo(df_data: pd.DataFrame, df_cap_ui: pd.DataFrame, params_ui: Any, co
     detalles, resumen = engine.execute_optimization(sku_pool)
 
     df_detalles = pd.DataFrame(detalles) if detalles else pd.DataFrame(columns=["LOTE_ID", "CATEGORIA", "MIX", "LNK", "LBS_ASIGNADAS", "APLICA_REGLA"])
-    df_resumen = pd.DataFrame(resumen) if resumen else pd.DataFrame(columns=["LOTE_ID", "CATEGORIA", "MIX", "LBS_TOTAL", "ANCHOS_UNICOS", "REGLA_DOMINANTE"])
     
-    # Estructura de salida idéntica para alimentar KPIs y gráficos interactivos de app.py
     return {
         "REPORTE_REGLAS_MIX": df_detalles,
         "CAPACIDAD_X_CATEG": df_cap_ui.copy(),
@@ -466,6 +438,86 @@ def run_loteo(df_data: pd.DataFrame, df_cap_ui: pd.DataFrame, params_ui: Any, co
         "REGLA_COMBINACION_ANCHOS": df_detalles[df_detalles["APLICA_REGLA"]=="COMBO_ANCHOS"] if not df_detalles.empty else df_detalles,
         "REGLA_COLOR_R": df_detalles[df_detalles["APLICA_REGLA"]=="COLOR_R"] if not df_detalles.empty else df_detalles,
         "REGLA_FAMILIA": df_detalles[df_detalles["APLICA_REGLA"]=="FAMILIA"] if not df_detalles.empty else df_detalles,
-        "OVERSHOOT_SUMMARY": pd.DataFrame(),
-        "DECISION_LOG": pd.DataFrame()
+        "OVERSHOOT_SUMMARY": pd.DataFrame(), "DECISION_LOG": pd.DataFrame()
     }
+
+
+# ==============================================================================
+# 6. ENTORNO GRÁFICO (INTERFAZ DE USUARIO STREAMLIT ORIGINAL)
+# ==============================================================================
+
+st.title("🧵 Loteo de Tintorería — NV2 (Consolidado)")
+
+# ---------------------------- 1. Carga de Archivos ----------------------------
+st.header("1. Carga de Archivos de Demanda y Capacidad")
+uploaded_file = st.file_uploader("Sube el archivo Excel de Entrada (.xlsx)", type=["xlsx"])
+
+if uploaded_file is not None:
+    # Simulamos el guardado de ruta para compatibilidad
+    st.session_state["excel_path"] = uploaded_file
+    if st.button("🔄 Cargar / Resetear Datos desde Excel"):
+        with st.spinner("Leyendo pestañas de planta..."):
+            df_data, df_fam = load_data_sheet(uploaded_file)
+            reglas_raw, params_default, df_cap_default = parse_reglas_operativas(uploaded_file)
+            
+            st.session_state["df_data"] = df_data
+            st.session_state["df_fam"] = df_fam
+            st.session_state["reglas_raw"] = reglas_raw
+            st.session_state["params"] = params_default
+            st.session_state["df_cap"] = df_cap_default
+            st.success("¡Datos cargados con éxito!")
+
+# ---------------------------- 2. Configuración de Reglas ----------------------------
+if st.session_state["df_data"] is not None:
+    st.header("2. Panel de Control de Reglas Operativas")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Restricciones de Ancho y Mezclas")
+        st.session_state["params"]["MIN_DIFF"] = st.number_input("Diferencia Mínima entre Anchos (pulg)", value=st.session_state["params"]["MIN_DIFF"])
+        st.session_state["params"]["MAX_DIFF"] = st.number_input("Diferencia Máxima entre Anchos (pulg)", value=st.session_state["params"]["MAX_DIFF"])
+        st.session_state["params"]["MAX_SKU"] = st.number_input("Límite de SKUs (LNKs) por Lote", value=st.session_state["params"]["MAX_SKU"], step=1)
+    
+    with col2:
+        st.subheader("Pesos del Algoritmo (Scoring)")
+        st.session_state["params"]["W_FILL"] = st.slider("Peso de Eficiencia de Carga (% Lote)", 0.0, 20.0, float(st.session_state["params"]["W_FILL"]))
+        st.session_state["params"]["W_CAP_LOSS"] = st.slider("Penalización por Pérdida de Capacidad", 0.0, 20.0, float(st.session_state["params"]["W_CAP_LOSS"]))
+        
+    selected_rule_str = st.selectbox("Jerarquía de Reglas Dominantes:", all_rule_order_options)
+    st.session_state["params"]["RULE_ORDER"] = selected_rule_str.split(">")
+
+    # ---------------------------- 3. Botón de Ejecución ----------------------------
+    st.header("3. Ejecución del Loteo")
+    if st.button("🚀 Ejecutar Secuenciación de Planta"):
+        with st.spinner("Procesando optimización combinatoria en tiempo real..."):
+            res = run_loteo(st.session_state["df_data"], st.session_state["df_cap"], st.session_state["params"], st.session_state["reglas_raw"])
+            st.session_state["resultado"] = res
+            
+            # Generación dinámica del Excel final estructurado en Cambria 8
+            out_io = io.BytesIO()
+            with pd.ExcelWriter(out_io, engine="openpyxl") as writer:
+                for sheet_name, df in res.items():
+                    df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+            st.session_state["excel_bytes"] = out_io.getvalue()
+            st.success("✅ ¡Loteo completado de forma exitosa!")
+
+# ---------------------------- 4. Despliegue de KPIs y Gráficos ----------------------------
+if st.session_state["resultado"] is not None:
+    st.header("4. Reportes de Planta y Métricas")
+    
+    df_maestro = st.session_state["resultado"]["REPORTE_REGLAS_MIX"]
+    
+    if not df_maestro.empty:
+        lbs_totales = df_maestro["LBS_ASIGNADAS"].sum()
+        lotes_creados = df_maestro["LOTE_ID"].nunique()
+        
+        kpi1, kpi2 = st.columns(2)
+        kpi1.metric("Libras Totales Asignadas", f"{lbs_totales:,.2f} Lbs")
+        kpi2.metric("Total de Lotes Programados", f"{lotes_creados} Lotes")
+        
+        st.subheader("Vista Previa del Reporte de Loteo")
+        st.dataframe(df_maestro.head(100), use_container_width=True)
+        
+        # Histograma interactivo de reglas aplicadas solicitado por planta
+        st.subheader("Análisis de Reglas Aplicadas")
+        fig = px.histogram(df_
