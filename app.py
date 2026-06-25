@@ -1,5 +1,5 @@
 # ==============================================================================
-# app.py — SISTEMA CONSOLIDADO NV2 (ROBUSTO CONTRA ERRORES DE INICIALIZACIÓN)
+# app.py — SISTEMA CONSOLIDADO NV2 PRO (PRODUCCIÓN COMPLETA - UN SOLO ARCHIVO)
 # ==============================================================================
 import io
 import json
@@ -11,11 +11,11 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 
-# 1. CONFIGURACIÓN DE PÁGINA (Debe ser estrictamente la primera instrucción)
+# 1. CONFIGURACIÓN DE PÁGINA (Primera instrucción obligatoria)
 st.set_page_config(page_title="Loteo de Tintorería NV2", layout="wide")
 
 # ==============================================================================
-# 2. CONSTANTES Y DICCIONARIOS MAESTROS POR DEFECTO
+# CONFIGURACIONES Y PARÁMETROS MAESTROS ORIGINALES
 # ==============================================================================
 DEFAULT_MAX_WIDTHS_BY_CAT = {
     "A-4000": 4, "B-3300": 4,
@@ -38,7 +38,7 @@ all_rule_order_options = [
 ]
 prioridad_bloque = ["VENCIDOS", "AHEAD", "AHEAD2", "OTROS"]
 
-# Valores de fábrica para evitar KeyError antes de cargar el Excel
+# Estructura extendida idéntica al parser original del backend
 PARAMS_FALLBACK = {
     "MIN_DIFF": 1.5,
     "MAX_DIFF": 4.0,
@@ -53,6 +53,12 @@ PARAMS_FALLBACK = {
     "W_TIPO_TEJIDO_FLEECE": 4.0,
     "RULE_ORDER": ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"],
     "WIDTH_PREF_LIST": [2, 3, 1, 4, 5, 6],
+    "RULE_TOGGLES": {
+        "RESTRICCION_FAMILIA": True,
+        "RESTRICCION_COLOR": True,
+        "RESTRICCION_ANCHO": True,
+        "COMBINACION_ANCHOS": True
+    }
 }
 
 DF_CAP_FALLBACK = pd.DataFrame([
@@ -62,7 +68,7 @@ DF_CAP_FALLBACK = pd.DataFrame([
     {"CATEGORIA": "E-1100", "MINIMO": 900.0, "MAXIMO": 1100.0, "CAPACIDAD_TOTAL": 11000.0, "MIX": "DYE", "MAX_WIDTHS": 2}
 ])
 
-# Inicialización segura del Session State
+# Inicialización robusta del estado de la aplicación
 if "df_data" not in st.session_state: st.session_state["df_data"] = None
 if "df_fam" not in st.session_state: st.session_state["df_fam"] = None
 if "reglas_raw" not in st.session_state: st.session_state["reglas_raw"] = {}
@@ -73,7 +79,7 @@ if "excel_bytes" not in st.session_state: st.session_state["excel_bytes"] = None
 
 
 # ==============================================================================
-# 3. PARSER DE REGLAS OPERATIVAS
+# PARSER DE REGLAS OPERATIVAS (Mapeo de Excel)
 # ==============================================================================
 def parse_reglas_operativas(excel_file):
     try:
@@ -94,7 +100,7 @@ def parse_reglas_operativas(excel_file):
 
 
 # ==============================================================================
-# 4. MOTOR CORE DE OPTIMIZACIÓN
+# MOTOR CORE DE OPTIMIZACIÓN NV2
 # ==============================================================================
 def load_data_sheet(excel_file):
     df_data = pd.read_excel(excel_file, sheet_name="DATA")
@@ -302,7 +308,7 @@ def format_workbook(path_xlsx, font_name="Cambria", font_size=8):
 
 
 # ==============================================================================
-# 5. ENTORNO GRÁFICO (STREAMLIT)
+# ENTORNO GRÁFICO (STREAMLIT)
 # ==============================================================================
 st.title("🧵 Loteo de Tintorería — NV2 PRO")
 
@@ -322,7 +328,6 @@ if uploaded_file is not None:
             st.session_state["df_cap"] = df_cap_default
             st.success("¡Hojas DATA, FAMILIA y REGLAS cargadas correctamente!")
 
-# Modificadores de la UI leyendo de forma segura de session_state
 st.header("2. Configuración Dinámica de Parámetros")
 col1, col2 = st.columns(2)
 
@@ -342,7 +347,7 @@ st.session_state["params"]["RULE_ORDER"] = selected_order.split(">")
 
 st.header("3. Ejecutar Algoritmo Combinatorio")
 if st.session_state["df_data"] is None:
-    st.info("💡 Sube un archivo Excel arriba en el Paso 1 para poder ejecutar el loteo con tus datos reales.")
+    st.info("💡 Sube un archivo Excel arriba en el Paso 1 para poder activar la simulación matemática.")
 else:
     if st.button("🚀 Iniciar Loteo de Producción"):
         with st.spinner("Corriendo simulación matemática..."):
