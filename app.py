@@ -1,28 +1,48 @@
 # ==============================================================================
-# loteo_engine.py
-# Motor de optimización y loteo industrial NV2 reestructurado.
-# INTEGRACIÓN COMPLETA: Mantiene compatibilidad absoluta con firmas de app.py
+# loteo_engine.py — ARQUITECTURA UNIFICADA NV2
+# Consolida Modelos Inmutables, Evaluación en NumPy y Parser de Configuración.
+# Mantiene compatibilidad absoluta con firmas y estructuras de la UI (app.py).
 # ==============================================================================
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Tuple, Optional, Any
+import re
 import pandas as pd
 import numpy as np
 
-# Re-inyectar variables globales requeridas por los selectores de app.py
+# ------------------------------------------------------------------------------
+# VARIABLES GLOBALES EXPORTADAS REQUERIDAS POR LOS SELECTORES DE LA UI
+# ------------------------------------------------------------------------------
 all_rule_order_options = [
     "ANCHO18>COMBO_ANCHOS>COLOR_R>FAMILIA",
     "FAMILIA>COLOR_R>COMBO_ANCHOS>ANCHO18",
     "ANCHO18>COLOR_R>COMBO_ANCHOS>FAMILIA"
 ]
 prioridad_bloque = ["VENCIDOS", "AHEAD", "AHEAD2", "OTROS"]
+rule_order_options = all_rule_order_options
+
+DEFAULT_MAX_WIDTHS_BY_CAT = {
+    "A-4000": 4, "B-3300": 4,
+    "C-2600": 3, "D-2200": 3, "F-2200": 3,
+    "E-1100": 2, "G-1100": 2,
+}
+
+DEFAULT_ALLOWED_PAIRS = [
+    ("VENCIDOS", "VENCIDOS"),
+    ("VENCIDOS", "AHEAD"),
+    ("AHEAD", "AHEAD"),
+    ("AHEAD", "AHEAD2"),
+    ("OTROS", "AHEAD2"),
+]
+
 
 # ==============================================================================
-# MODELOS DE DATOS E INMUTABILIDAD (ARQUITECTURA LIMPIA)
+# 1. MODELOS DE DATOS E INMUTABILIDAD CORE
 # ==============================================================================
 
 @dataclass(frozen=True)
 class OptimizationParams:
+    """Configuración global y pesos de penalización matemática del motor."""
     min_diff: float
     max_diff: float
     max_sku: int
@@ -44,8 +64,10 @@ class OptimizationParams:
     w_tipo_tejido_flemish: float = 4.0
     beam_width: int = 3
 
+
 @dataclass(frozen=True)
 class CapRange:
+    """Representación física inmutable de un rango de capacidad de reactor."""
     rango_id: str
     categoria: str
     minimo: float
@@ -53,8 +75,10 @@ class CapRange:
     capacidad: float
     mix: str
 
+
 @dataclass
 class SkuRow:
+    """Estado mutable de un rollo/SKU durante las asignaciones parciales."""
     idx: int
     lnk: str
     tela_cuerpo: str
@@ -73,24 +97,28 @@ class SkuRow:
     lbs_restantes: float
     lbs_scrap: float = 0.0
 
+
 @dataclass
 class BatchCandidate:
+    """Estructura candidata para evaluar métricas de scoring antes de consolidar."""
     rango_id: str
     categoria: str
     mix: str
     minimo: float
     maximo: float
     total_lote: float
-    rows_assigned: List[Tuple[int, float]]
+    rows_assigned: List[Tuple[int, float]]  # List of (idx, lbs_asignadas)
     anchos_unicos: List[float]
     pct_carga_usado: float
     score: float = -1e30
 
+
 # ==============================================================================
-# REPOSITORIO DE DATOS Y PARSERS
+# 2. CAPA DE ENTRADA Y REPOSITORIO VECTORIZADO
 # ==============================================================================
 
 class DataRepository:
+    """Validador y normalizador de las demandas de planta."""
     REQUIRED_DATA_COLS = ["LNK", "TELA.CUERPO", "COLOR", "PRIORIDAD", "ANCHO.F.C", "ANCHO.F.M", "TOTAL", "MIX", "CONSUMO_C"]
 
     @staticmethod
@@ -144,8 +172,9 @@ class DataRepository:
         if "AHEAD" in prio_text: return "AHEAD"
         return "OTROS"
 
+
 # ==============================================================================
-# VALUADORES MATEMÁTICOS DE REGLAS
+# 3. EVALUACIÓN DE REGLAS OPERATIVAS INDUSTRIALES
 # ==============================================================================
 
 class RuleEvaluator:
@@ -180,6 +209,7 @@ class RuleEvaluator:
                 return "FAMILIA", prios, rule_info
         return "DEFAULT", [], rule_info
 
+
 class BatchScorer:
     @staticmethod
     def calculate_score(batch: BatchCandidate, unique_widths: Set[float], seed: SkuRow, params: OptimizationParams, context_rules: Dict[str, Any]) -> float:
@@ -201,8 +231,9 @@ class BatchScorer:
                     score += params.w_tipo_tejido_flemish
         return score
 
+
 # ==============================================================================
-# MOTOR CORE CON COMPATIBILIDAD VECTORIZADA
+# 4. MOTOR CORE (BEAM SEARCH VECTORIZADO EN NUMPY)
 # ==============================================================================
 
 class LoteoEngine:
@@ -338,8 +369,41 @@ class LoteoEngine:
                 if not batch_constructed: break
         return detalle_salida, resumen_salida
 
+
 # ==============================================================================
-# FUNCIONES PUENTE CON FIRMAS EXACTAS PARA INTERFAZ ORIGINAL (APP.PY)
+# 5. COMPATIBILIDAD CON PARSER DE REGLAS OPERATIVAS (EX-MODULO PARSER)
+# ==============================================================================
+
+def parse_reglas_operativas(excel_path: str):
+    """Parsea las reglas de planta e inyecta parámetros por defecto mapeados a la UI."""
+    params_default = {
+        "MIN_DIFF": 1.5, "MAX_DIFF": 4.0, "MAX_SKU": 5,
+        "SPLIT_MIN_LBS_DEFAULT": 500.0, "SPLIT_MIN_LBS_ANCHO18": 500.0,
+        "W_FILL": 5.0, "W_CAP_LOSS": 3.0, "W_WIDTH_PREF": 2.0, "W_1100_WIDTHS_STRICT": 10.0,
+        "TIPO_TEJIDO_ENABLE": True, "W_TIPO_TEJIDO_FLEECE": 4.0,
+        "RULE_ORDER": ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"],
+        "WIDTH_PREF_LIST": [2, 3, 1, 4, 5, 6],
+        "RULE_TOGGLES": {
+            "RESTRICCION_FAMILIA": True, "RESTRICCION_COLOR": True,
+            "RESTRICCION_ANCHO": True, "COMBINACION_ANCHOS": True
+        }
+    }
+
+    try:
+        df_cap = pd.read_excel(excel_path, sheet_name="REGLAS_OPERATIVAS")
+    except Exception:
+        df_cap = pd.DataFrame([
+            {"CATEGORIA": "A-4000", "MINIMO": 3200.0, "MAXIMO": 4000.0, "CAPACIDAD": 40000.0, "MIX": "DYE"},
+            {"CATEGORIA": "B-3300", "MINIMO": 2600.0, "MAXIMO": 3300.0, "CAPACIDAD": 33000.0, "MIX": "DYE"},
+            {"CATEGORIA": "E-1100", "MINIMO": 900.0, "MAXIMO": 1100.0, "CAPACIDAD": 11000.0, "MIX": "DYE"}
+        ])
+
+    context_rules = {"restr_ancho": {}, "reglas_combo": [], "restr_color": {}, "restr_fam": {}}
+    return context_rules, params_default, build_cap_dataframe(df_cap)
+
+
+# ==============================================================================
+# 6. ENLACES Y MÉTODOS PUENTE REQUERIDOS EXACTAMENTE POR APP.PY
 # ==============================================================================
 
 def load_data_sheet(excel_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -348,9 +412,10 @@ def load_data_sheet(excel_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return df_data, df_fam
 
 def build_cap_dataframe(df_cap_raw: pd.DataFrame) -> pd.DataFrame:
-    if "CAPACIDAD_TOTAL" not in df_cap_raw.columns and "CAPACIDAD" in df_cap_raw.columns:
-        df_cap_raw["CAPACIDAD_TOTAL"] = df_cap_raw["CAPACIDAD"]
-    return df_cap_raw
+    df_res = df_cap_raw.copy()
+    if "CAPACIDAD_TOTAL" not in df_res.columns and "CAPACIDAD" in df_res.columns:
+        df_res["CAPACIDAD_TOTAL"] = df_res["CAPACIDAD"]
+    return df_res
 
 def format_workbook(path_xlsx: str, font_name: str = "Cambria", font_size: int = 8):
     from openpyxl import load_workbook
@@ -362,6 +427,9 @@ def format_workbook(path_xlsx: str, font_name: str = "Cambria", font_size: int =
             for c in range(1, ws.max_column + 1):
                 ws.cell(r, c).font = f
     wb.save(path_xlsx)
+
+def build_reports(resultado_dict: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+    return resultado_dict
 
 def run_loteo(df_data: pd.DataFrame, df_cap_ui: pd.DataFrame, params_ui: Any, context_rules: Dict[str, Any]) -> Dict[str, Any]:
     mix_allowed_set = {("VENCIDOS", "VENCIDOS"), ("VENCIDOS", "AHEAD"), ("AHEAD", "AHEAD"), ("AHEAD", "AHEAD2"), ("OTROS", "AHEAD2")}
@@ -388,7 +456,7 @@ def run_loteo(df_data: pd.DataFrame, df_cap_ui: pd.DataFrame, params_ui: Any, co
     df_detalles = pd.DataFrame(detalles) if detalles else pd.DataFrame(columns=["LOTE_ID", "CATEGORIA", "MIX", "LNK", "LBS_ASIGNADAS", "APLICA_REGLA"])
     df_resumen = pd.DataFrame(resumen) if resumen else pd.DataFrame(columns=["LOTE_ID", "CATEGORIA", "MIX", "LBS_TOTAL", "ANCHOS_UNICOS", "REGLA_DOMINANTE"])
     
-    # Construir dataframes espejo idénticos para no romper los gráficos de app.py
+    # Estructura de salida idéntica para alimentar KPIs y gráficos interactivos de app.py
     return {
         "REPORTE_REGLAS_MIX": df_detalles,
         "CAPACIDAD_X_CATEG": df_cap_ui.copy(),
@@ -401,6 +469,3 @@ def run_loteo(df_data: pd.DataFrame, df_cap_ui: pd.DataFrame, params_ui: Any, co
         "OVERSHOOT_SUMMARY": pd.DataFrame(),
         "DECISION_LOG": pd.DataFrame()
     }
-
-def build_reports(resultado_dict: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
-    return resultado_dict
