@@ -2,7 +2,7 @@
 # requirements.txt — Entorno de Producción: Planificación Industrial NV2
 # ==============================================================================
 
-# Framework de Interfaz y Gráficos Interactivos
+# Interfaz y Gráficos Interactivos
 streamlit>=1.35.0
 plotly>=5.18.0
 
@@ -10,7 +10,7 @@ plotly>=5.18.0
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Persistencia y Formateo Automatizado de Hojas de Ruta de Planta
+# Persistencia y Formateo de Reportes (Hojas de Excel)
 openpyxl>=3.1.0
 
 # Soporte de Zona Horaria para Auditoría de Loteo
