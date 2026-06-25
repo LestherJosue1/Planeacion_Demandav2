@@ -1,5 +1,5 @@
 # ==============================================================================
-# app.py — App Streamlit de Loteo de Tintorería (NV2 COMPLETAMENTE CORREGIDO)
+# app.py — App Streamlit de Loteo de Tintorería (NV2 - ESTABLE)
 # ==============================================================================
 import io
 import json
@@ -28,42 +28,45 @@ if "df_cap" not in st.session_state: st.session_state["df_cap"] = None
 if "resultado" not in st.session_state: st.session_state["resultado"] = None
 if "excel_bytes" not in st.session_state: st.session_state["excel_bytes"] = None
 
-def reset_params_from_excel(uploaded_file):
-    """Parsea las reglas operativas directamente desde el archivo cargado en memoria"""
-    reglas_raw, params_default, df_cap_default = parse_reglas_operativas(uploaded_file)
-    st.session_state["reglas_raw"] = reglas_raw
-    st.session_state["params"] = params_default
-    st.session_state["df_cap"] = df_cap_default
-
-# ---------------------------- 1. Carga de Archivos ----------------------------
+# ---------------------------- 1. Carga de Archivo Maestro ----------------------------
 st.header("1. Carga de Archivo Maestro")
 uploaded_file = st.file_uploader("Sube el archivo Excel con DATA, FAMILIA y REGLAS_OPERATIVAS", type=["xlsx"])
 
 if uploaded_file is not None:
-    # Si el estado está vacío, cargamos los datos inmediatamente de forma segura
+    # Si la data aún no se ha cargado en el estado, la inicializamos una sola vez de forma automática
     if st.session_state["df_data"] is None:
-        with st.spinner("Cargando datos iniciales del Excel..."):
+        with st.spinner("Inicializando datos y parámetros desde el archivo Excel..."):
             try:
                 df_d, df_f = load_data_sheet(uploaded_file)
+                reglas_raw, params_default, df_cap_default = parse_reglas_operativas(uploaded_file)
+                
                 st.session_state["df_data"] = df_d
                 st.session_state["df_fam"] = df_f
-                reset_params_from_excel(uploaded_file)
-                st.success("✅ Archivo cargado e inicializado correctamente.")
+                st.session_state["reglas_raw"] = reglas_raw
+                st.session_state["params"] = params_default
+                st.session_state["df_cap"] = df_cap_default
+                st.success("✅ Archivo maestro inicializado correctamente.")
             except Exception as e:
-                st.error(f"Error al inicializar el archivo: {e}")
+                st.error(f"❌ Error al leer las pestañas del Excel: {e}")
 
-    # Botón de restauración original en caso de requerir un reinicio limpio
+    # Botón de restauración corregido (ahora sí tiene acceso seguro a 'uploaded_file')
     if st.button("🔄 Reiniciar Parámetros desde Excel"):
-        with st.spinner("Restableciendo configuración original..."):
-            reset_params_from_excel(uploaded_file)
-            st.success("✅ Parámetros restablecidos al estado del Excel.")
+        with st.spinner("Restableciendo configuraciones de fábrica..."):
+            try:
+                reglas_raw, params_default, df_cap_default = parse_reglas_operativas(uploaded_file)
+                st.session_state["reglas_raw"] = reglas_raw
+                st.session_state["params"] = params_default
+                st.session_state["df_cap"] = df_cap_default
+                st.success("✅ Configuración restablecida al estado original del Excel.")
+            except Exception as e:
+                st.error(f"❌ Error al reiniciar: {e}")
 
 # ---------------------------- 2. Configuración Dinámica ----------------------------
-# Bloque de seguridad: Solo renderizar la interfaz si los parámetros ya fueron parseados del Excel
+# Validamos de forma estricta que 'params' ya exista para evitar cualquier KeyError en la interfaz
 if st.session_state["params"] is not None and st.session_state["df_cap"] is not None:
     st.header("2. Configuración de Reglas Operativas")
     
-    # Pestañas de control idénticas a tu diseño nativo
+    # Tus 4 pestañas de control originales sin modificaciones estructurales
     tab_gen, tab_cap, tab_rules, tab_adv = st.tabs([
         "⚙️ Parámetros Generales", 
         "🛢️ Capacidad de Reactores", 
@@ -96,7 +99,7 @@ if st.session_state["params"] is not None and st.session_state["df_cap"] is not 
                 value=float(st.session_state["params"]["SPLIT_MIN_LBS_ANCHO18"])
             )
             
-            # Selector de orden de reglas
+            # Selector de orden de reglas estratégico
             curr_order = ">".join(st.session_state["params"]["RULE_ORDER"])
             if curr_order not in all_rule_order_options:
                 all_rule_order_options.append(curr_order)
@@ -109,7 +112,6 @@ if st.session_state["params"] is not None and st.session_state["df_cap"] is not 
 
     with tab_cap:
         st.subheader("Capacidades y Restricciones por Categoría")
-        # Permitir edición interactiva del DataFrame de capacidades extraído del Excel
         st.session_state["df_cap"] = st.data_editor(
             st.session_state["df_cap"], 
             use_container_width=True, 
@@ -137,7 +139,7 @@ if st.session_state["params"] is not None and st.session_state["df_cap"] is not 
     if st.button("🚀 Ejecutar Loteo Automático", type="primary"):
         with st.spinner("Procesando asignaciones en reactores óptimos..."):
             try:
-                # Ejecución directa pasando los estados mutados de la UI
+                # Ejecución nativa pasando los estados configurados en la pantalla
                 res = run_loteo(
                     st.session_state["df_data"], 
                     st.session_state["df_cap"], 
@@ -146,7 +148,7 @@ if st.session_state["params"] is not None and st.session_state["df_cap"] is not 
                 )
                 st.session_state["resultado"] = res
                 
-                # Generación del archivo en memoria (BytesIO) para evitar bloqueos de disco
+                # Generación limpia en memoria RAM (BytesIO) para evitar bloqueos del sistema de archivos local
                 out_io = io.BytesIO()
                 with pd.ExcelWriter(out_io, engine="openpyxl") as writer:
                     used_names = set()
@@ -166,7 +168,7 @@ if st.session_state["params"] is not None and st.session_state["df_cap"] is not 
                                 df_safe[col] = df_safe[col].apply(lambda v: v if (v is None or isinstance(v, (str, int, float, bool))) else str(v))
                         df_safe.to_excel(writer, index=False, sheet_name=sheet_name)
                 
-                # Guardar temporalmente para dar formato estricto Cambria 8
+                # Guardar el archivo formateado con la tipografía Cambria 8 estricta del backend
                 temp_file = "RESULTADOS_LOTES_TEMP.xlsx"
                 with open(temp_file, "wb") as f:
                     f.write(out_io.getvalue())
@@ -178,12 +180,12 @@ if st.session_state["params"] is not None and st.session_state["df_cap"] is not 
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
                     
-                st.success("🎉 ¡Loteo completado con éxito! Reportes listos para descarga.")
+                st.success("🎉 ¡Loteo completado con éxito! Los reportes se encuentran listos para visualización y descarga.")
             except Exception as e:
                 st.session_state["excel_bytes"] = None
-                st.error(f"❌ Error en la simulación: {e}")
+                st.error(f"❌ Error en la simulación matemática: {e}")
 
-# ---------------------------- 4. Despliegue de Resultados ----------------------------
+# ---------------------------- 4. Despliegue de Resultados y KPIs ----------------------------
 if st.session_state["resultado"] is not None:
     st.header("4. Diagnóstico de Loteo y Descarga")
     
@@ -205,4 +207,4 @@ if st.session_state["resultado"] is not None:
             )
 else:
     if uploaded_file is None:
-        st.info("💡 Sube tu archivo maestro de producción en el Paso 1 para activar los paneles operativos.")
+        st.info("💡 Por favor, sube tu archivo maestro de producción en el Paso 1 para activar los controles del sistema.")
