@@ -1,6 +1,5 @@
 # ==============================================================================
-# app.py — SISTEMA CONSOLIDADO NV2 (TODO EN UN SOLO ARCHIVO)
-# INTERFAZ STREAMLIT + PARSER DE REGLAS + MOTOR DE LOTEO COMPLETO
+# app.py — SISTEMA CONSOLIDADO NV2 (INTERFAZ + MOTOR INTEGRADO)
 # ==============================================================================
 import io
 import json
@@ -12,11 +11,11 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 
-# Configuración inicial de Streamlit (Obligatorio como primera instrucción)
+# Configuración de página (SIEMPRE debe ser la primera instrucción de Streamlit)
 st.set_page_config(page_title="Loteo de Tintorería NV2", layout="wide")
 
 # ==============================================================================
-# CONTROLES Y CONSTANTES GLOBALES (Ex-módulos externos)
+# 1. CONSTANTES Y CONFIGURACIONES POR DEFECTO
 # ==============================================================================
 DEFAULT_MAX_WIDTHS_BY_CAT = {
     "A-4000": 4, "B-3300": 4,
@@ -40,7 +39,7 @@ all_rule_order_options = [
 ]
 prioridad_bloque = ["VENCIDOS", "AHEAD", "AHEAD2", "OTROS"]
 
-# Inicialización del estado de la app
+# Inicialización segura del Session State
 for key, default in [
     ("df_data", None), ("df_fam", None), ("reglas_raw", None),
     ("params", None), ("df_cap", None), ("excel_path", None),
@@ -51,35 +50,27 @@ for key, default in [
 
 
 # ==============================================================================
-# PARTE 1: PARSER DE REGLAS OPERATIVAS (Ex reglas_operativas_parser.py)
+# 2. PARSER DE REGLAS OPERATIVAS (Antes en reglas_operativas_parser.py)
 # ==============================================================================
 def _num(x, default=None):
     try:
         if x is None or (isinstance(x, float) and pd.isna(x)):
             return default
         return float(x)
-    except Exception:
+    except:
         return default
 
-def _first_number(text, default=None):
-    if pd.isna(text): return default
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)", str(text))
-    return float(m.group(1)) if m else default
-
 def parse_reglas_operativas(excel_file):
-    """Parsea la pestaña REGLAS_OPERATIVAS extrayendo diccionarios de restricciones y params."""
     try:
         df = pd.read_excel(excel_file, sheet_name="REGLAS_OPERATIVAS")
     except Exception:
-        # Fallback si no existe la hoja durante desarrollo
-        df_cap_fallback = pd.DataFrame([
+        df_fallback = pd.DataFrame([
             {"CATEGORIA": "A-4000", "MINIMO": 3200.0, "MAXIMO": 4000.0, "CAPACIDAD": 40000.0, "MIX": "DYE"},
             {"CATEGORIA": "B-3300", "MINIMO": 2600.0, "MAXIMO": 3300.0, "CAPACIDAD": 33000.0, "MIX": "DYE"},
             {"CATEGORIA": "E-1100", "MINIMO": 900.0, "MAXIMO": 1100.0, "CAPACIDAD": 11000.0, "MIX": "DYE"}
         ])
-        return {}, {}, df_cap_fallback
+        return {}, {}, df_fallback
 
-    # Valores base por defecto mapeados del backend original
     p = {
         "MIN_DIFF": 1.5, "MAX_DIFF": 4.0, "MAX_SKU": 5,
         "SPLIT_MIN_LBS_DEFAULT": 500.0, "SPLIT_MIN_LBS_ANCHO18": 500.0,
@@ -87,15 +78,9 @@ def parse_reglas_operativas(excel_file):
         "TIPO_TEJIDO_ENABLE": 1, "W_TIPO_TEJIDO_FLEECE": 4.0,
         "RULE_ORDER": ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"],
         "WIDTH_PREF_LIST": [2, 3, 1, 4, 5, 6],
-        "RULE_TOGGLES": {
-            "RESTRICCION_FAMILIA": True, "RESTRICCION_COLOR": True,
-            "RESTRICCION_ANCHO": True, "COMBINACION_ANCHOS": True
-        }
     }
 
     ctx = {"restr_ancho": {}, "reglas_combo": [], "restr_color": {}, "restr_fam": {}}
-    
-    # Filtrar solo filas válidas de máquinas para retornar el DataFrame de capacidades
     df_cap_clean = df[df["CATEGORIA"].notna() & df["MINIMO"].notna() & df["MAXIMO"].notna()].copy()
     if "CAPACIDAD_TOTAL" not in df_cap_clean.columns and "CAPACIDAD" in df_cap_clean.columns:
         df_cap_clean["CAPACIDAD_TOTAL"] = df_cap_clean["CAPACIDAD"]
@@ -104,27 +89,17 @@ def parse_reglas_operativas(excel_file):
 
 
 # ==============================================================================
-# PARTE 2: MOTOR DE OPTIMIZACIÓN CORE NV2 (Ex loteo_engine.py)
+# 3. MOTOR DE OPTIMIZACIÓN CORE DE LOTEO (Antes en loteo_engine.py)
 # ==============================================================================
 def load_data_sheet(excel_file):
     df_data = pd.read_excel(excel_file, sheet_name="DATA")
     df_fam = pd.read_excel(excel_file, sheet_name="FAMILIA")
     return df_data, df_fam
 
-def build_cap_dataframe(df_cap_raw):
-    df_res = df_cap_raw.copy()
-    if "CAPACIDAD_TOTAL" not in df_res.columns and "CAPACIDAD" in df_res.columns:
-        df_res["CAPACIDAD_TOTAL"] = df_res["CAPACIDAD"]
-    return df_res
-
 def _clean_str(v):
     return "" if pd.isna(v) else str(v).strip().upper()
 
 def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
-    """Ejecuta el algoritmo puro NV2 usando matrices de NumPy para validación rápida de anchos."""
-    import math
-    
-    # Recuperar parámetros configurados en la interfaz
     min_diff = float(params_ui.get("MIN_DIFF", 1.5))
     max_diff = float(params_ui.get("MAX_DIFF", 4.0))
     max_sku = int(params_ui.get("MAX_SKU", 5))
@@ -138,7 +113,6 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
     w_1100_strict = float(params_ui.get("W_1100_WIDTHS_STRICT", 10.0))
     width_pref_list = params_ui.get("WIDTH_PREF_LIST", [2, 3, 1, 4])
 
-    # Inicializar capacidades por máquina
     df_cap_cap = df_cap_ui.copy()
     df_cap_cap["LBS_ASIGNADAS"] = 0.0
     cap_restante_dict = {}
@@ -149,12 +123,9 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
         cap_restante_dict[rid] = float(r.get("CAPACIDAD_TOTAL", r.get("CAPACIDAD", 999999)))
         max_widths_dict[rid] = int(r.get("MAX_WIDTHS", 3 if "1100" not in str(r["CATEGORIA"]) else 2))
 
-    # Construir pool de SKUs mutables
     pool = []
     for idx, row in df_data.iterrows():
         prio = _clean_str(row.get("PRIORIDAD", "OTROS"))
-        
-        # Clasificación por bloques de prioridad acordada
         bloque = "OTROS"
         if any(tok in prio for tok in ["PAST DUE", "DUE", "VENC"]): bloque = "VENCIDOS"
         elif "AHEAD2" in prio: bloque = "AHEAD2"
@@ -180,7 +151,6 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
             "lbs_scrap": 0.0
         })
 
-    # Lógica de asignación y agrupamiento
     detalles, resumen = [], []
     lote_id_counter = 1
     mix_allowed = {("VENCIDOS", "VENCIDOS"), ("VENCIDOS", "AHEAD"), ("AHEAD", "AHEAD"), ("AHEAD", "AHEAD2"), ("OTROS", "AHEAD2")}
@@ -202,9 +172,7 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
                     block_skus.sort(key=lambda x: x["lbs_restantes"], reverse=True)
 
                     best_batch = None
-                    # Beam Search sobre los primeros candidatos semilla
                     for seed in block_skus[:3]:
-                        # Evaluación de regla dominante
                         regla_aplicada = "DEFAULT"
                         split_lim = split_min_default
                         
@@ -213,9 +181,7 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
                                 regla_aplicada = "ANCHO18"
                                 split_lim = split_min_ancho18
                                 break
-                            # Las demás reglas se evalúan según diccionarios del contexto
 
-                        # Evaluar contra cada rango físico de máquina disponible
                         for i_m, r_m in df_cap_cap.iterrows():
                             rid = f"R_{i_m}"
                             if cap_restante_dict[rid] <= 0: continue
@@ -223,14 +189,11 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
                             max_efec = min(float(r_m["MAXIMO"]) * seed["pct_carga"], cap_restante_dict[rid])
                             if seed["lbs_restantes"] <= 0 or max_efec <= 0: continue
 
-                            # Intentar pre-construir lote
                             b_lbs, b_rows, b_lnks, b_blocks, b_widths = 0.0, [], set(), [], []
                             
-                            # Función interna de validación por NumPy para tolerancias de anchos
                             def can_add(sku, take):
                                 if len(b_lnks.union({sku["lnk"]})) > max_sku: return False
                                 if any((b, sku["bloque"]) not in mix_allowed for b in b_blocks): return False
-                                
                                 tmp_w = sorted(list(set(b_widths + sku["anchos"])))
                                 if len(tmp_w) > max_widths_dict[rid]: return False
                                 if len(tmp_w) > 1:
@@ -240,7 +203,6 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
                                     if not np.all((diffs[idx_tri] >= min_diff) & (diffs[idx_tri] <= max_diff)): return False
                                 return (b_lbs + take) <= (max_efec + 1e-9)
 
-                            # Meter semilla
                             t_seed = min(seed["lbs_restantes"], max_efec)
                             if t_seed > 0 and can_add(seed, t_seed):
                                 b_lbs += t_seed
@@ -249,11 +211,9 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
                                 b_blocks.append(seed["bloque"])
                                 b_widths.extend(seed["anchos"])
 
-                                # Rellenar con SKUs secundarios compatibles
                                 for sku in local_pool:
                                     if sku["idx"] == seed["idx"] or sku["lbs_restantes"] <= 0: continue
                                     if b_lbs >= max_efec - 1e-6: break
-                                    
                                     t_sku = min(sku["lbs_restantes"], max_efec - b_lbs)
                                     if t_sku > 0 and can_add(sku, t_sku):
                                         b_lbs += t_sku
@@ -263,7 +223,6 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
                                         b_widths.extend(sku["anchos"])
 
                             if b_lbs >= (float(r_m["MINIMO"]) * seed["pct_carga"]):
-                                # Calcular score del lote estructurado
                                 f_rate = b_lbs / float(r_m["MAXIMO"])
                                 loss = float(r_m["MAXIMO"]) - b_lbs
                                 n_w = len(set(b_widths))
@@ -286,12 +245,10 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
                         l_id = f"L{lote_id_counter:06d}"
                         lote_id_counter += 1
                         
-                        # Consolidar asignaciones del lote elegido
                         for s_idx, lbs_asig in best_batch["rows"]:
                             target = next(s for s in local_pool if s["idx"] == s_idx)
                             target["lbs_restantes"] = max(0.0, target["lbs_restantes"] - lbs_asig)
                             
-                            # Limpieza automática de colas pequeñas de tela (Scrap)
                             if 0.0 < target["lbs_restantes"] < best_batch["split_lim"]:
                                 target["lbs_scrap"] += target["lbs_restantes"]
                                 target["lbs_restantes"] = 0.0
@@ -323,7 +280,8 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
         "REGLA_COMBINACION_ANCHOS": df_detalles[df_detalles["APLICA_REGLA"]=="COMBO_ANCHOS"] if not df_detalles.empty else df_detalles,
         "REGLA_COLOR_R": df_detalles[df_detalles["APLICA_REGLA"]=="COLOR_R"] if not df_detalles.empty else df_detalles,
         "REGLA_FAMILIA": df_detalles[df_detalles["APLICA_REGLA"]=="FAMILIA"] if not df_detalles.empty else df_detalles,
-        "OVERSHOOT_SUMMARY": pd.DataFrame(), "DECISION_LOG": pd.DataFrame()
+        "OVERSHOOT_SUMMARY": pd.DataFrame(columns=["MIX", "LNK", "LBS_EXTRA_SOBRE_ORDEN", "LBS_ASIGNADAS"]), 
+        "DECISION_LOG": pd.DataFrame()
     }
 
 def format_workbook(path_xlsx, font_name="Cambria", font_size=8):
@@ -337,16 +295,12 @@ def format_workbook(path_xlsx, font_name="Cambria", font_size=8):
                 ws.cell(r, c).font = f
     wb.save(path_xlsx)
 
-def build_reports(resultado_dict):
-    return resultado_dict
-
 
 # ==============================================================================
-# PARTE 3: INTERFAZ GRÁFICA DE USUARIO (STREAMLIT)
+# 4. ENTORNO GRÁFICO (STREAMLIT)
 # ==============================================================================
 st.title("🧵 Loteo de Tintorería — NV2 PRO")
 
-# ---------------------------- 1. Carga de Datos ----------------------------
 st.header("1. Entrada de Datos de Planta")
 uploaded_file = st.file_uploader("Sube el archivo maestro de producción (.xlsx)", type=["xlsx"])
 
@@ -364,7 +318,6 @@ if uploaded_file is not None:
             st.session_state["df_cap"] = df_cap_default
             st.success("¡Hojas DATA, FAMILIA y REGLAS cargadas correctamente!")
 
-# ---------------------------- 2. Panel Técnico de Reglas ----------------------------
 if st.session_state["df_data"] is not None:
     st.header("2. Configuración Dinámica de Parámetros")
     
@@ -383,25 +336,21 @@ if st.session_state["df_data"] is not None:
     selected_order = st.selectbox("Estrategia de Secuenciación (Orden de Reglas):", all_rule_order_options)
     st.session_state["params"]["RULE_ORDER"] = selected_order.split(">")
 
-    # ---------------------------- 3. Botón de Corrida ----------------------------
     st.header("3. Ejecutar Algoritmo Combinatorio")
     if st.button("🚀 Iniciar Loteo de Producción"):
         with st.spinner("Corriendo simulación matemática..."):
             res = run_loteo(st.session_state["df_data"], st.session_state["df_cap"], st.session_state["params"], st.session_state["reglas_raw"])
             st.session_state["resultado"] = res
             
-            # Generar el archivo Excel temporal en memoria respetando el formato Cambria 8 requerido
             out_io = io.BytesIO()
             with pd.ExcelWriter(out_io, engine="openpyxl") as writer:
                 for sheet_name, df in res.items():
-                    # Forzar compatibilidad de tipos para openpyxl
                     df_safe = df.copy()
                     for col in df_safe.columns:
                         if df_safe[col].dtype == object:
                             df_safe[col] = df_safe[col].apply(lambda v: v if (v is None or isinstance(v, (str, int, float, bool))) else str(v))
                     df_safe.to_excel(writer, index=False, sheet_name=sheet_name[:31])
             
-            # Guardado temporal en disco para aplicar la fuente corporativa
             temp_path = "temp_resultados.xlsx"
             with open(temp_path, "wb") as f:
                 f.write(out_io.getvalue())
@@ -415,7 +364,6 @@ if st.session_state["df_data"] is not None:
                 
             st.success("🎉 ¡Loteo completado con éxito!")
 
-# ---------------------------- 4. Dashboards Interactivos ----------------------------
 if st.session_state["resultado"] is not None:
     st.header("4. Visualización de Indicadores y Descarga")
     
