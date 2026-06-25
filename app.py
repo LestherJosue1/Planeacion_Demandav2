@@ -1,5 +1,5 @@
 # ==============================================================================
-# app.py — SISTEMA CONSOLIDADO NV2 (INTERFAZ + MOTOR INTEGRADO)
+# app.py — SISTEMA CONSOLIDADO NV2 (ROBUSTO CONTRA ERRORES DE INICIALIZACIÓN)
 # ==============================================================================
 import io
 import json
@@ -11,11 +11,11 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 
-# Configuración de página (SIEMPRE debe ser la primera instrucción de Streamlit)
+# 1. CONFIGURACIÓN DE PÁGINA (Debe ser estrictamente la primera instrucción)
 st.set_page_config(page_title="Loteo de Tintorería NV2", layout="wide")
 
 # ==============================================================================
-# 1. CONSTANTES Y CONFIGURACIONES POR DEFECTO
+# 2. CONSTANTES Y DICCIONARIOS MAESTROS POR DEFECTO
 # ==============================================================================
 DEFAULT_MAX_WIDTHS_BY_CAT = {
     "A-4000": 4, "B-3300": 4,
@@ -31,7 +31,6 @@ DEFAULT_ALLOWED_PAIRS = [
     ("OTROS", "AHEAD2"),
 ]
 
-RULE_TOKENS = ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"]
 all_rule_order_options = [
     "ANCHO18>COMBO_ANCHOS>COLOR_R>FAMILIA",
     "FAMILIA>COLOR_R>COMBO_ANCHOS>ANCHO18",
@@ -39,57 +38,63 @@ all_rule_order_options = [
 ]
 prioridad_bloque = ["VENCIDOS", "AHEAD", "AHEAD2", "OTROS"]
 
+# Valores de fábrica para evitar KeyError antes de cargar el Excel
+PARAMS_FALLBACK = {
+    "MIN_DIFF": 1.5,
+    "MAX_DIFF": 4.0,
+    "MAX_SKU": 5,
+    "SPLIT_MIN_LBS_DEFAULT": 500.0,
+    "SPLIT_MIN_LBS_ANCHO18": 500.0,
+    "W_FILL": 5.0,
+    "W_CAP_LOSS": 3.0,
+    "W_WIDTH_PREF": 2.0,
+    "W_1100_WIDTHS_STRICT": 10.0,
+    "TIPO_TEJIDO_ENABLE": 1,
+    "W_TIPO_TEJIDO_FLEECE": 4.0,
+    "RULE_ORDER": ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"],
+    "WIDTH_PREF_LIST": [2, 3, 1, 4, 5, 6],
+}
+
+DF_CAP_FALLBACK = pd.DataFrame([
+    {"CATEGORIA": "A-4000", "MINIMO": 3200.0, "MAXIMO": 4000.0, "CAPACIDAD_TOTAL": 40000.0, "MIX": "DYE", "MAX_WIDTHS": 4},
+    {"CATEGORIA": "B-3300", "MINIMO": 2600.0, "MAXIMO": 3300.0, "CAPACIDAD_TOTAL": 33000.0, "MIX": "DYE", "MAX_WIDTHS": 4},
+    {"CATEGORIA": "C-2600", "MINIMO": 2000.0, "MAXIMO": 2600.0, "CAPACIDAD_TOTAL": 26000.0, "MIX": "DYE", "MAX_WIDTHS": 3},
+    {"CATEGORIA": "E-1100", "MINIMO": 900.0, "MAXIMO": 1100.0, "CAPACIDAD_TOTAL": 11000.0, "MIX": "DYE", "MAX_WIDTHS": 2}
+])
+
 # Inicialización segura del Session State
-for key, default in [
-    ("df_data", None), ("df_fam", None), ("reglas_raw", None),
-    ("params", None), ("df_cap", None), ("excel_path", None),
-    ("resultado", None), ("excel_bytes", None)
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+if "df_data" not in st.session_state: st.session_state["df_data"] = None
+if "df_fam" not in st.session_state: st.session_state["df_fam"] = None
+if "reglas_raw" not in st.session_state: st.session_state["reglas_raw"] = {}
+if "params" not in st.session_state: st.session_state["params"] = PARAMS_FALLBACK.copy()
+if "df_cap" not in st.session_state: st.session_state["df_cap"] = DF_CAP_FALLBACK.copy()
+if "resultado" not in st.session_state: st.session_state["resultado"] = None
+if "excel_bytes" not in st.session_state: st.session_state["excel_bytes"] = None
 
 
 # ==============================================================================
-# 2. PARSER DE REGLAS OPERATIVAS (Antes en reglas_operativas_parser.py)
+# 3. PARSER DE REGLAS OPERATIVAS
 # ==============================================================================
-def _num(x, default=None):
-    try:
-        if x is None or (isinstance(x, float) and pd.isna(x)):
-            return default
-        return float(x)
-    except:
-        return default
-
 def parse_reglas_operativas(excel_file):
     try:
         df = pd.read_excel(excel_file, sheet_name="REGLAS_OPERATIVAS")
     except Exception:
-        df_fallback = pd.DataFrame([
-            {"CATEGORIA": "A-4000", "MINIMO": 3200.0, "MAXIMO": 4000.0, "CAPACIDAD": 40000.0, "MIX": "DYE"},
-            {"CATEGORIA": "B-3300", "MINIMO": 2600.0, "MAXIMO": 3300.0, "CAPACIDAD": 33000.0, "MIX": "DYE"},
-            {"CATEGORIA": "E-1100", "MINIMO": 900.0, "MAXIMO": 1100.0, "CAPACIDAD": 11000.0, "MIX": "DYE"}
-        ])
-        return {}, {}, df_fallback
+        return {}, PARAMS_FALLBACK.copy(), DF_CAP_FALLBACK.copy()
 
-    p = {
-        "MIN_DIFF": 1.5, "MAX_DIFF": 4.0, "MAX_SKU": 5,
-        "SPLIT_MIN_LBS_DEFAULT": 500.0, "SPLIT_MIN_LBS_ANCHO18": 500.0,
-        "W_FILL": 5.0, "W_CAP_LOSS": 3.0, "W_WIDTH_PREF": 2.0, "W_1100_WIDTHS_STRICT": 10.0,
-        "TIPO_TEJIDO_ENABLE": 1, "W_TIPO_TEJIDO_FLEECE": 4.0,
-        "RULE_ORDER": ["ANCHO18", "COMBO_ANCHOS", "COLOR_R", "FAMILIA"],
-        "WIDTH_PREF_LIST": [2, 3, 1, 4, 5, 6],
-    }
-
+    p = PARAMS_FALLBACK.copy()
     ctx = {"restr_ancho": {}, "reglas_combo": [], "restr_color": {}, "restr_fam": {}}
+    
     df_cap_clean = df[df["CATEGORIA"].notna() & df["MINIMO"].notna() & df["MAXIMO"].notna()].copy()
     if "CAPACIDAD_TOTAL" not in df_cap_clean.columns and "CAPACIDAD" in df_cap_clean.columns:
         df_cap_clean["CAPACIDAD_TOTAL"] = df_cap_clean["CAPACIDAD"]
+    if "MAX_WIDTHS" not in df_cap_clean.columns:
+        df_cap_clean["MAX_WIDTHS"] = df_cap_clean["CATEGORIA"].map(DEFAULT_MAX_WIDTHS_BY_CAT).fillna(3)
 
     return ctx, p, df_cap_clean
 
 
 # ==============================================================================
-# 3. MOTOR DE OPTIMIZACIÓN CORE DE LOTEO (Antes en loteo_engine.py)
+# 4. MOTOR CORE DE OPTIMIZACIÓN
 # ==============================================================================
 def load_data_sheet(excel_file):
     df_data = pd.read_excel(excel_file, sheet_name="DATA")
@@ -153,7 +158,7 @@ def run_loteo(df_data, df_cap_ui, params_ui, context_rules):
 
     detalles, resumen = [], []
     lote_id_counter = 1
-    mix_allowed = {("VENCIDOS", "VENCIDOS"), ("VENCIDOS", "AHEAD"), ("AHEAD", "AHEAD"), ("AHEAD", "AHEAD2"), ("OTROS", "AHEAD2")}
+    mix_allowed = set(DEFAULT_ALLOWED_PAIRS)
 
     df_view = pd.DataFrame(pool)
     if not df_view.empty:
@@ -297,7 +302,7 @@ def format_workbook(path_xlsx, font_name="Cambria", font_size=8):
 
 
 # ==============================================================================
-# 4. ENTORNO GRÁFICO (STREAMLIT)
+# 5. ENTORNO GRÁFICO (STREAMLIT)
 # ==============================================================================
 st.title("🧵 Loteo de Tintorería — NV2 PRO")
 
@@ -305,7 +310,6 @@ st.header("1. Entrada de Datos de Planta")
 uploaded_file = st.file_uploader("Sube el archivo maestro de producción (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
-    st.session_state["excel_path"] = uploaded_file
     if st.button("🔄 Inicializar y Cargar Datos del Excel"):
         with st.spinner("Procesando pestañas del archivo..."):
             df_data, df_fam = load_data_sheet(uploaded_file)
@@ -318,25 +322,28 @@ if uploaded_file is not None:
             st.session_state["df_cap"] = df_cap_default
             st.success("¡Hojas DATA, FAMILIA y REGLAS cargadas correctamente!")
 
-if st.session_state["df_data"] is not None:
-    st.header("2. Configuración Dinámica de Parámetros")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("⚙️ Tolerancias Técnicas")
-        st.session_state["params"]["MIN_DIFF"] = st.number_input("Diferencia Mínima de Ancho (pulgadas)", value=st.session_state["params"]["MIN_DIFF"])
-        st.session_state["params"]["MAX_DIFF"] = st.number_input("Diferencia Máxima de Ancho (pulgadas)", value=st.session_state["params"]["MAX_DIFF"])
-        st.session_state["params"]["MAX_SKU"] = st.number_input("Máximo de LNKs por Reactor", value=int(st.session_state["params"]["MAX_SKU"]), step=1)
-    
-    with col2:
-        st.subheader("⚖️ Pesos de Optimización (Scoring)")
-        st.session_state["params"]["W_FILL"] = st.slider("Importancia del Factor de Carga", 0.0, 20.0, float(st.session_state["params"]["W_FILL"]))
-        st.session_state["params"]["W_CAP_LOSS"] = st.slider("Penalización de Espacio Vacío", 0.0, 20.0, float(st.session_state["params"]["W_CAP_LOSS"]))
-        
-    selected_order = st.selectbox("Estrategia de Secuenciación (Orden de Reglas):", all_rule_order_options)
-    st.session_state["params"]["RULE_ORDER"] = selected_order.split(">")
+# Modificadores de la UI leyendo de forma segura de session_state
+st.header("2. Configuración Dinámica de Parámetros")
+col1, col2 = st.columns(2)
 
-    st.header("3. Ejecutar Algoritmo Combinatorio")
+with col1:
+    st.subheader("⚙️ Tolerancias Técnicas")
+    st.session_state["params"]["MIN_DIFF"] = st.number_input("Diferencia Mínima de Ancho (pulgadas)", value=float(st.session_state["params"]["MIN_DIFF"]))
+    st.session_state["params"]["MAX_DIFF"] = st.number_input("Diferencia Máxima de Ancho (pulgadas)", value=float(st.session_state["params"]["MAX_DIFF"]))
+    st.session_state["params"]["MAX_SKU"] = st.number_input("Máximo de LNKs por Reactor", value=int(st.session_state["params"]["MAX_SKU"]), step=1)
+
+with col2:
+    st.subheader("⚖️ Pesos de Optimización (Scoring)")
+    st.session_state["params"]["W_FILL"] = st.slider("Importancia del Factor de Carga", 0.0, 20.0, float(st.session_state["params"]["W_FILL"]))
+    st.session_state["params"]["W_CAP_LOSS"] = st.slider("Penalización de Espacio Vacío", 0.0, 20.0, float(st.session_state["params"]["W_CAP_LOSS"]))
+    
+selected_order = st.selectbox("Estrategia de Secuenciación (Orden de Reglas):", all_rule_order_options)
+st.session_state["params"]["RULE_ORDER"] = selected_order.split(">")
+
+st.header("3. Ejecutar Algoritmo Combinatorio")
+if st.session_state["df_data"] is None:
+    st.info("💡 Sube un archivo Excel arriba en el Paso 1 para poder ejecutar el loteo con tus datos reales.")
+else:
     if st.button("🚀 Iniciar Loteo de Producción"):
         with st.spinner("Corriendo simulación matemática..."):
             res = run_loteo(st.session_state["df_data"], st.session_state["df_cap"], st.session_state["params"], st.session_state["reglas_raw"])
@@ -366,7 +373,6 @@ if st.session_state["df_data"] is not None:
 
 if st.session_state["resultado"] is not None:
     st.header("4. Visualización de Indicadores y Descarga")
-    
     df_maestro = st.session_state["resultado"]["REPORTE_REGLAS_MIX"]
     
     if not df_maestro.empty:
